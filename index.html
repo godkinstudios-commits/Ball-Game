@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>BounceBound Pro 2.5D</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #f3f4f6;
+            touch-action: none; /* Prevent browser zooming/scrolling */
+            font-family: 'Inter', sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .menu-card {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            padding: 2rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.1);
+            text-align: center;
+            pointer-events: auto;
+            transition: transform 0.2s ease;
+            border: 1px solid rgba(255,255,255,0.5);
+        }
+        .hidden {
+            display: none !important;
+        }
+        #score-hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 2rem;
+            font-weight: 800;
+            color: #1f2937;
+            text-shadow: 2px 2px 0px rgba(255,255,255,0.5);
+            pointer-events: none;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 40px;
+            width: 100%;
+            text-align: center;
+            color: #9ca3af;
+            font-size: 0.9rem;
+            pointer-events: none;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="score-hud">0</div>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-layer">
+        <div id="start-menu" class="menu-card">
+            <h1 class="text-4xl font-black text-slate-800 mb-2 tracking-tighter">BOUNCE<span class="text-blue-500">BOUND</span></h1>
+            <p class="text-slate-500 mb-6 font-medium">2.5D Physics Engine</p>
+            <button id="start-btn" class="bg-slate-900 text-white px-8 py-3 rounded-full font-bold text-lg shadow-lg hover:scale-105 transition-transform active:scale-95">PLAY NOW</button>
+        </div>
+
+        <div id="game-over-menu" class="menu-card hidden">
+            <h2 class="text-3xl font-black text-red-500 mb-2">CRUSHED!</h2>
+            <p class="text-slate-600 mb-4">Score: <span id="final-score">0</span></p>
+            <button id="restart-btn" class="bg-blue-600 text-white px-8 py-3 rounded-full font-bold text-lg shadow-lg hover:scale-105 transition-transform active:scale-95">TRY AGAIN</button>
+        </div>
+    </div>
+
+    <div id="controls-hint">
+        <span>Hold <span class="font-bold text-slate-600">LEFT</span> or <span class="font-bold text-slate-600">RIGHT</span> side to move</span>
+    </div>
+
+    <script type="module">
+        // --- PWA Registration ---
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW Fail:', err));
+        }
+
+        // --- Game Engine ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize
+        const uiStart = document.getElementById('start-menu');
+        const uiGameOver = document.getElementById('game-over-menu');
+        const scoreEl = document.getElementById('score-hud');
+        const finalScoreEl = document.getElementById('final-score');
+
+        // State
+        let gameState = 'MENU'; // MENU, PLAYING, GAMEOVER
+        let score = 0;
+        let width, height;
+        let scale = 1;
+
+        // Physics Constants
+        const GRAVITY = 0.5;
+        const JUMP_FORCE = -14;
+        const MOVE_SPEED = 7;
+        const FRICTION = 0.85;
+
+        // Camera
+        let cameraY = 0;
+        let maxCameraY = 0;
+
+        // Entities
+        const ball = {
+            x: 0, y: 0, r: 12,
+            vx: 0, vy: 0,
+            color: '#3b82f6'
+        };
+
+        let platforms = [];
+        
+        // Inputs
+        const input = { left: false, right: false };
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            scale = Math.min(width, height) / 500; // adaptive scaling logic if needed
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Input Handling (Pointer Events for Touch + Mouse) ---
+        function handleInput(e, isDown) {
+            if (gameState !== 'PLAYING') return;
+            // prevent default to stop selecting text etc
+            // e.preventDefault(); 
+            
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            const halfWidth = width / 2;
+            
+            if (isDown) {
+                if (clientX < halfWidth) {
+                    input.left = true;
+                    input.right = false;
+                } else {
+                    input.right = true;
+                    input.left = false;
+                }
+            } else {
+                // On lift, we just stop forcing that direction. 
+                // Simplistic logic: clear both on any lift to prevent stuck keys
+                input.left = false;
+                input.right = false;
+            }
+        }
+
+        window.addEventListener('pointerdown', (e) => handleInput(e, true));
+        window.addEventListener('pointerup', (e) => handleInput(e, false));
+        // Also touch events specific backup
+        window.addEventListener('touchstart', (e) => handleInput(e, true), {passive: false});
+        window.addEventListener('touchend', (e) => handleInput(e, false));
+
+
+        // --- Game Logic ---
+
+        function initGame() {
+            score = 0;
+            scoreEl.innerText = score;
+            
+            // Reset Ball
+            ball.x = width / 2;
+            ball.y = height - 150;
+            ball.vx = 0;
+            ball.vy = JUMP_FORCE;
+            
+            // Reset Camera
+            cameraY = 0;
+            maxCameraY = 0;
+
+            // Generate Initial Platforms
+            platforms = [];
+            // A safe starter platform
+            platforms.push(createPlatform(width/2 - 50, height - 50, 100, 'normal'));
+            
+            // Generate more
+            let currentY = height - 50;
+            for(let i=0; i<10; i++) {
+                currentY -= (100 + Math.random() * 60);
+                platforms.push(generateRandomPlatform(currentY));
+            }
+
+            gameState = 'PLAYING';
+            uiStart.classList.add('hidden');
+            uiGameOver.classList.add('hidden');
+            
+            loop();
+        }
+
+        function createPlatform(x, y, w, type, speedX = 0) {
+            return {
+                x, y, w, h: 20,
+                type, // 'normal', 'moving', 'spike'
+                vx: speedX,
+                visited: false
+            };
+        }
+
+        function generateRandomPlatform(y) {
+            const w = 80 + Math.random() * 60;
+            let x = Math.random() * (width - w);
+            
+            let type = 'normal';
+            let vx = 0;
+            
+            // Difficulty scaling
+            const difficulty = score / 1000;
+            const spikeChance = Math.min(0.4, difficulty * 0.1); // Max 40% chance
+            const moveChance = Math.min(0.5, difficulty * 0.15);
+
+            // Moving Logic
+            if (Math.random() < moveChance && score > 500) {
+                type = 'moving';
+                vx = (2 + Math.random() * 3) * (Math.random() > 0.5 ? 1 : -1);
+            }
+
+            // Spike Logic (Spiked platforms can also move)
+            if (Math.random() < spikeChance && score > 1000) {
+                type = 'spike';
+            }
+
+            return createPlatform(x, y, w, type, vx);
+        }
+
+        function gameOver() {
+            gameState = 'GAMEOVER';
+            finalScoreEl.innerText = Math.floor(score);
+            uiGameOver.classList.remove('hidden');
+        }
+
+        function update() {
+            if (gameState !== 'PLAYING') return;
+
+            // 1. Movement
+            if (input.left) ball.vx -= 0.8;
+            if (input.right) ball.vx += 0.8;
+            
+            // Friction & Limits
+            ball.vx *= FRICTION;
+            ball.x += ball.vx;
+            ball.y += ball.vy;
+            ball.vy += GRAVITY;
+
+            // Screen Wrap
+            if (ball.x < -ball.r) ball.x = width + ball.r;
+            if (ball.x > width + ball.r) ball.x = -ball.r;
+
+            // Camera Follow (Only moves up)
+            // Target Y is where the ball "should" be relative to screen
+            const targetCamY = ball.y - height * 0.4;
+            if (targetCamY < cameraY) {
+                cameraY = targetCamY;
+                score += Math.abs(ball.vy); // Score based on height gained
+                scoreEl.innerText = Math.floor(score);
+            }
+
+            // Platform Logic
+            platforms.forEach(p => {
+                // Move platform if moving
+                if (p.type === 'moving' || (p.type === 'spike' && p.vx !== 0)) {
+                    p.x += p.vx;
+                    if (p.x <= 0 || p.x + p.w >= width) {
+                        p.vx *= -1;
+                    }
+                }
+
+                // Collision Detection
+                // Only collide if falling (vy > 0) and ball is above platform
+                // 2.5D visual: platform is drawn with depth, but collision is on the top surface
+                if (ball.vy > 0 && 
+                    ball.y + ball.r > p.y && 
+                    ball.y + ball.r < p.y + p.h + ball.vy + 5 && // slightly generous hit detection
+                    ball.x > p.x && 
+                    ball.x < p.x + p.w) {
+                    
+                    if (p.type === 'spike') {
+                        gameOver();
+                    } else {
+                        ball.vy = JUMP_FORCE;
+                        // visual pop
+                        p.hitOffset = 5;
+                    }
+                }
+                
+                // Reset hit visual
+                if (p.hitOffset) p.hitOffset *= 0.8;
+                if (p.hitOffset < 0.1) p.hitOffset = 0;
+            });
+
+            // Cleanup & Generation
+            platforms = platforms.filter(p => p.y - cameraY < height + 100);
+            const highestPlatform = platforms[platforms.length - 1];
+            if (highestPlatform.y - cameraY > 100) {
+                 // Generate new if top is getting too low
+                 // Not strictly index based, just keeping buffer
+            }
+            
+            // Better Generation: Always keep platforms above screen
+            while (platforms[platforms.length - 1].y - cameraY > -100) {
+                 const newY = platforms[platforms.length - 1].y - (100 + Math.random() * 80);
+                 platforms.push(generateRandomPlatform(newY));
+            }
+
+            // Death Condition (fall below screen)
+            if (ball.y - cameraY > height) {
+                gameOver();
+            }
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#f3f4f6';
+            ctx.fillRect(0, 0, width, height);
+            
+            // Grid lines for pseudo-3D effect
+            ctx.strokeStyle = '#e5e7eb';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for(let i=0; i<width; i+=50) {
+                ctx.moveTo(i, 0); ctx.lineTo(i, height);
+            }
+            ctx.stroke();
+
+            // 2.5D Depth Offset
+            const depth = 10;
+
+            // Draw Platforms
+            platforms.forEach(p => {
+                const screenY = p.y - cameraY;
+                const pushY = p.hitOffset || 0;
+                
+                // Don't draw if off screen
+                if (screenY > height + 50 || screenY < -50) return;
+
+                // 1. Draw 3D Side (Depth)
+                ctx.fillStyle = p.type === 'spike' ? '#7f1d1d' : '#475569'; // Dark red for spike side, dark slate for normal
+                ctx.beginPath();
+                ctx.moveTo(p.x, screenY + pushY);
+                ctx.lineTo(p.x + p.w, screenY + pushY);
+                ctx.lineTo(p.x + p.w + depth, screenY + p.h + depth + pushY);
+                ctx.lineTo(p.x + depth, screenY + p.h + depth + pushY);
+                ctx.fill();
+
+                // 2. Draw Top Face
+                if (p.type === 'spike') {
+                     // Dangerous Platform Base
+                     ctx.fillStyle = '#ef4444';
+                     ctx.fillRect(p.x, screenY + pushY, p.w, p.h);
+
+                     // Spikes on top
+                     ctx.fillStyle = '#b91c1c';
+                     const spikeCount = Math.floor(p.w / 15);
+                     const spikeW = p.w / spikeCount;
+                     for(let s=0; s<spikeCount; s++) {
+                         ctx.beginPath();
+                         ctx.moveTo(p.x + s*spikeW, screenY + pushY);
+                         ctx.lineTo(p.x + s*spikeW + spikeW/2, screenY + pushY - 15);
+                         ctx.lineTo(p.x + (s+1)*spikeW, screenY + pushY);
+                         ctx.fill();
+                     }
+                } else {
+                     // Safe Platform
+                     ctx.fillStyle = p.type === 'moving' ? '#60a5fa' : '#94a3b8';
+                     ctx.fillRect(p.x, screenY + pushY, p.w, p.h);
+                }
+
+                // Highlight Edge for 3D feel
+                ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                ctx.fillRect(p.x, screenY + pushY, p.w, 4);
+            });
+
+            // Draw Ball
+            const ballScreenY = ball.y - cameraY;
+            
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.beginPath();
+            ctx.ellipse(ball.x + depth, ballScreenY + depth + ball.r, ball.r, ball.r * 0.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Ball Body
+            const grad = ctx.createRadialGradient(ball.x - 5, ballScreenY - 5, 2, ball.x, ballScreenY, ball.r);
+            grad.addColorStop(0, '#60a5fa');
+            grad.addColorStop(1, '#1d4ed8');
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(ball.x, ballScreenY, ball.r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Shine
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.beginPath();
+            ctx.arc(ball.x - 4, ballScreenY - 4, ball.r/3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function loop() {
+            if (gameState !== 'PLAYING') {
+                 // Draw one frame even if paused/gameover so background stays
+                 if(gameState === 'GAMEOVER') draw();
+                 return;
+            }
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // Init Listeners
+        document.getElementById('start-btn').addEventListener('click', initGame);
+        document.getElementById('restart-btn').addEventListener('click', initGame);
+
+        // Initial Draw
+        ctx.fillStyle = '#f3f4f6';
+        ctx.fillRect(0,0, canvas.width, canvas.height);
+
+    </script>
+</body>
+</html>
